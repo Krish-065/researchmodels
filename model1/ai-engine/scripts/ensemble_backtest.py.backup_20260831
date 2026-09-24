@@ -1,0 +1,2177 @@
+from __future__ import annotations
+
+from pathlib import Path
+import warnings
+
+import numpy as np
+import pandas as pd
+
+warnings.filterwarnings("ignore")
+
+
+# =====================================================================
+# PATHS
+# =====================================================================
+
+DATA_PATH = Path("/workspace/data/features/nse_features.parquet")
+
+LGB_PATH = Path(
+    "/workspace/data/models/lightgbm_lambdarank.txt"
+)
+
+TCN_PATH = Path(
+    "/workspace/data/models/tcn_5d.pt"
+)
+
+GNN_PATH = Path(
+    "/workspace/data/models/gnn_5d.pt"
+)
+
+GRAPH_PATH = Path(
+    "/workspace/data/features/stock_graph.npz"
+)
+
+
+# =====================================================================
+# BASIC FEATURES
+# =====================================================================
+
+BASE_FEATURES = [
+    "return_1d",
+    "return_5d",
+    "return_20d",
+    "return_60d",
+    "close_sma5_ratio",
+    "close_sma20_ratio",
+    "close_sma50_ratio",
+    "close_sma200_ratio",
+    "macd",
+    "macd_signal",
+    "rsi_14",
+    "volatility_20d",
+    "volatility_60d",
+    "high_low_range",
+    "open_close_return",
+    "volume_change",
+    "volume_zscore",
+]
+
+
+RANK_FEATURES = [
+    "return_1d",
+    "return_5d",
+    "return_20d",
+    "return_60d",
+    "close_sma5_ratio",
+    "close_sma20_ratio",
+    "close_sma50_ratio",
+    "close_sma200_ratio",
+    "rsi_14",
+    "volatility_20d",
+    "volatility_60d",
+    "volume_zscore",
+]
+
+
+# =====================================================================
+# LIGHTGBM FEATURE LIST
+#
+# This MUST match the trained LightGBM checkpoint.
+# Verified from the checkpoint:
+# 55 features.
+# =====================================================================
+
+LGB_FEATURES = [
+    # Base 17
+    "return_1d",
+    "return_5d",
+    "return_20d",
+    "return_60d",
+    "close_sma5_ratio",
+    "close_sma20_ratio",
+    "close_sma50_ratio",
+    "close_sma200_ratio",
+    "macd",
+    "macd_signal",
+    "rsi_14",
+    "volatility_20d",
+    "volatility_60d",
+    "high_low_range",
+    "open_close_return",
+    "volume_change",
+    "volume_zscore",
+
+    # Rank 12
+    "return_1d_rank",
+    "return_5d_rank",
+    "return_20d_rank",
+    "return_60d_rank",
+    "close_sma5_ratio_rank",
+    "close_sma20_ratio_rank",
+    "close_sma50_ratio_rank",
+    "close_sma200_ratio_rank",
+    "rsi_14_rank",
+    "volatility_20d_rank",
+    "volatility_60d_rank",
+    "volume_zscore_rank",
+
+    # Z-score 12
+    "return_1d_z",
+    "return_5d_z",
+    "return_20d_z",
+    "return_60d_z",
+    "close_sma5_ratio_z",
+    "close_sma20_ratio_z",
+    "close_sma50_ratio_z",
+    "close_sma200_ratio_z",
+    "rsi_14_z",
+    "volatility_20d_z",
+    "volatility_60d_z",
+    "volume_zscore_z",
+
+    # Market 4
+    "market_return_1d",
+    "market_return_5d",
+    "market_return_20d",
+    "market_volatility",
+
+    # Breadth 5
+    "breadth_1d",
+    "breadth_5d",
+    "breadth_sma20",
+    "breadth_sma50",
+    "breadth_sma200",
+
+    # Relative strength 3
+    "relative_return_1d",
+    "relative_return_5d",
+    "relative_return_20d",
+
+    # Regime 2
+    "market_positive_regime",
+    "market_high_volatility",
+]
+
+
+# =====================================================================
+# DATA LOADING
+# =====================================================================
+
+def load_data() -> pd.DataFrame:
+
+    print()
+    print("LOADING DATA")
+    print("-" * 70)
+
+    df = pd.read_parquet(DATA_PATH)
+
+    if "timestamp" not in df.columns:
+        raise RuntimeError(
+            "Dataset does not contain timestamp column."
+        )
+
+    if "symbol" not in df.columns:
+        raise RuntimeError(
+            "Dataset does not contain symbol column."
+        )
+
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"],
+        utc=True,
+    )
+
+    df = df.sort_values(
+        ["timestamp", "symbol"]
+    ).reset_index(drop=True)
+
+    print("Rows   :", len(df))
+    print("Symbols:", df["symbol"].nunique())
+    print(
+        "Dates  :",
+        df["timestamp"].min(),
+        "->",
+        df["timestamp"].max(),
+    )
+
+    return df
+
+
+# =====================================================================
+# CROSS-SECTIONAL FEATURE ENGINEERING
+# =====================================================================
+
+def add_cross_sectional_features(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+
+    df = df.copy()
+
+    df = df.sort_values(
+        ["timestamp", "symbol"]
+    ).reset_index(drop=True)
+
+    daily = df.groupby(
+        "timestamp",
+        sort=False,
+    )
+
+    # ---------------------------------------------------------------
+    # RANK FEATURES
+    # ---------------------------------------------------------------
+
+    for col in RANK_FEATURES:
+
+        df[f"{col}_rank"] = (
+            daily[col]
+            .rank(
+                pct=True,
+                method="average",
+            )
+        )
+
+    # ---------------------------------------------------------------
+    # Z-SCORES
+    # ---------------------------------------------------------------
+
+    for col in RANK_FEATURES:
+
+        mean = daily[col].transform("mean")
+
+        std = daily[col].transform("std")
+
+        df[f"{col}_z"] = (
+            (df[col] - mean)
+            /
+            std.replace(0, np.nan)
+        )
+
+    # ---------------------------------------------------------------
+    # MARKET STATE
+    # ---------------------------------------------------------------
+
+    df["market_return_1d"] = (
+        daily["return_1d"]
+        .transform("mean")
+    )
+
+    df["market_return_5d"] = (
+        daily["return_5d"]
+        .transform("mean")
+    )
+
+    df["market_return_20d"] = (
+        daily["return_20d"]
+        .transform("mean")
+    )
+
+    df["market_volatility"] = (
+        daily["volatility_20d"]
+        .transform("mean")
+    )
+
+    # ---------------------------------------------------------------
+    # BREADTH
+    # ---------------------------------------------------------------
+
+    df["breadth_1d"] = (
+        daily["return_1d"]
+        .transform(
+            lambda x: (x > 0).mean()
+        )
+    )
+
+    df["breadth_5d"] = (
+        daily["return_5d"]
+        .transform(
+            lambda x: (x > 0).mean()
+        )
+    )
+
+    df["breadth_sma20"] = (
+        daily["close_sma20_ratio"]
+        .transform(
+            lambda x: (x > 0).mean()
+        )
+    )
+
+    df["breadth_sma50"] = (
+        daily["close_sma50_ratio"]
+        .transform(
+            lambda x: (x > 0).mean()
+        )
+    )
+
+    df["breadth_sma200"] = (
+        daily["close_sma200_ratio"]
+        .transform(
+            lambda x: (x > 0).mean()
+        )
+    )
+
+    # ---------------------------------------------------------------
+    # RELATIVE RETURNS
+    # ---------------------------------------------------------------
+
+    df["relative_return_1d"] = (
+        df["return_1d"]
+        -
+        df["market_return_1d"]
+    )
+
+    df["relative_return_5d"] = (
+        df["return_5d"]
+        -
+        df["market_return_5d"]
+    )
+
+    df["relative_return_20d"] = (
+        df["return_20d"]
+        -
+        df["market_return_20d"]
+    )
+
+    # ---------------------------------------------------------------
+    # HISTORICAL MARKET VOLATILITY REGIME
+    #
+    # IMPORTANT:
+    # Do NOT compare today's value against today's median.
+    # Use a rolling historical median.
+    # ---------------------------------------------------------------
+
+    market_vol = (
+        df[
+            [
+                "timestamp",
+                "market_volatility",
+            ]
+        ]
+        .drop_duplicates(
+            "timestamp"
+        )
+        .sort_values("timestamp")
+        .copy()
+    )
+
+    market_vol[
+        "market_vol_median_60d"
+    ] = (
+        market_vol[
+            "market_volatility"
+        ]
+        .rolling(
+            60,
+            min_periods=20,
+        )
+        .median()
+    )
+
+    df = df.merge(
+        market_vol[
+            [
+                "timestamp",
+                "market_vol_median_60d",
+            ]
+        ],
+        on="timestamp",
+        how="left",
+    )
+
+    df["market_high_volatility"] = (
+        df["market_volatility"]
+        >
+        df["market_vol_median_60d"]
+    ).astype("int8")
+
+    df["market_positive_regime"] = (
+        df["market_return_20d"] > 0
+    ).astype("int8")
+
+    return df
+
+
+# =====================================================================
+# FEATURE CLEANING
+# =====================================================================
+
+def clean_features(
+    df: pd.DataFrame,
+    features: list[str],
+) -> pd.DataFrame:
+
+    missing = [
+        f
+        for f in features
+        if f not in df.columns
+    ]
+
+    if missing:
+
+        raise RuntimeError(
+            "Missing required features:\n"
+            + "\n".join(missing)
+        )
+
+    x = df[features].copy()
+
+    x = x.replace(
+        [np.inf, -np.inf],
+        np.nan,
+    )
+
+    x = x.fillna(0.0)
+
+    return x
+
+
+# =====================================================================
+# LIGHTGBM
+# =====================================================================
+
+def load_lightgbm():
+
+    import lightgbm as lgb
+
+    print()
+    print("LOADING LIGHTGBM")
+    print("-" * 70)
+
+    model = lgb.Booster(
+        model_file=str(LGB_PATH)
+    )
+
+    checkpoint_features = (
+        model.feature_name()
+    )
+
+    print(
+        "LightGBM features:",
+        len(checkpoint_features),
+    )
+
+    if checkpoint_features != LGB_FEATURES:
+
+        print()
+        print(
+            "WARNING: checkpoint feature list "
+            "differs from hard-coded list."
+        )
+
+        print(
+            "Using checkpoint feature list."
+        )
+
+    else:
+
+        print(
+            "Feature schema verified: 55 features."
+        )
+
+    return model
+
+
+def predict_lightgbm(
+    model,
+    df: pd.DataFrame,
+):
+
+    print()
+    print("GENERATING LIGHTGBM SCORES...")
+    print("-" * 70)
+
+    features = model.feature_name()
+
+    x = clean_features(
+        df,
+        features,
+    )
+
+    pred = model.predict(x)
+
+    pred = np.asarray(
+        pred,
+        dtype=np.float64,
+    ).reshape(-1)
+
+    if len(pred) != len(df):
+
+        raise RuntimeError(
+            f"LightGBM prediction length "
+            f"{len(pred)} != dataframe length "
+            f"{len(df)}"
+        )
+
+    df = df.copy()
+
+    df["lightgbm_score"] = pred
+
+    print(
+        "Score mean:",
+        float(np.mean(pred)),
+    )
+
+    print(
+        "Score std :",
+        float(np.std(pred)),
+    )
+
+    return df
+
+
+# =====================================================================
+# GENERIC DAILY RANK
+# =====================================================================
+
+def add_daily_rank(
+    df: pd.DataFrame,
+    score_col: str,
+    rank_col: str,
+):
+
+    df = df.copy()
+
+    df[rank_col] = (
+        df.groupby("timestamp")[score_col]
+        .rank(
+            ascending=False,
+            method="first",
+            pct=True,
+        )
+    )
+
+    return df
+
+
+# =====================================================================
+# FACTOR COMPOSITE
+# =====================================================================
+
+def add_factor_score(
+    df: pd.DataFrame,
+):
+
+    df = df.copy()
+
+    factors = {
+        "return_20d": 0.30,
+        "return_60d": 0.15,
+        "close_sma20_ratio": 0.20,
+        "rsi_14": 0.15,
+        "close_sma50_ratio": 0.10,
+        "volume_zscore": 0.10,
+    }
+
+    total = np.zeros(
+        len(df),
+        dtype=np.float64,
+    )
+
+    weight_sum = 0.0
+
+    for col, weight in factors.items():
+
+        if col not in df.columns:
+            continue
+
+        rank = (
+            df.groupby("timestamp")[col]
+            .rank(
+                pct=True,
+                method="average",
+            )
+        )
+
+        total += (
+            weight
+            * rank.fillna(0.5)
+            .to_numpy()
+        )
+
+        weight_sum += weight
+
+    if weight_sum > 0:
+
+        df["factor_score"] = (
+            total / weight_sum
+        )
+
+    else:
+
+        df["factor_score"] = 0.5
+
+    return df
+
+
+# =====================================================================
+# SIMPLE MOMENTUM
+# =====================================================================
+
+def add_momentum_score(
+    df: pd.DataFrame,
+):
+
+    df = df.copy()
+
+    ranks = []
+
+    for col in [
+        "return_20d",
+        "return_60d",
+    ]:
+
+        if col not in df.columns:
+            continue
+
+        r = (
+            df.groupby("timestamp")[col]
+            .rank(
+                pct=True,
+                method="average",
+            )
+        )
+
+        ranks.append(
+            r.fillna(0.5)
+        )
+
+    if ranks:
+
+        df["momentum_score"] = (
+            pd.concat(
+                ranks,
+                axis=1,
+            )
+            .mean(axis=1)
+        )
+
+    else:
+
+        df["momentum_score"] = 0.5
+
+    return df
+
+
+# =====================================================================
+# NORMALIZE SCORE CROSS-SECTIONALLY
+# =====================================================================
+
+def rank_score(
+    df: pd.DataFrame,
+    score_col: str,
+):
+
+    out = (
+        df.groupby("timestamp")[score_col]
+        .rank(
+            pct=True,
+            method="average",
+        )
+    )
+
+    return out.fillna(0.5)
+
+
+# =====================================================================
+# TCN
+# =====================================================================
+
+def predict_tcn(
+    df: pd.DataFrame,
+):
+
+    print()
+    print("GENERATING TCN SCORES...")
+    print("-" * 70)
+
+    try:
+
+        import torch
+        import torch.nn as nn
+
+    except Exception as exc:
+
+        print(
+            "TCN unavailable:",
+            repr(exc),
+        )
+
+        df["tcn_score"] = np.nan
+
+        return df
+
+    try:
+
+        checkpoint = torch.load(
+            TCN_PATH,
+            map_location="cpu",
+            weights_only=False,
+        )
+
+        print(
+            "TCN checkpoint loaded."
+        )
+
+    except Exception as exc:
+
+        print(
+            "Could not load TCN:",
+            repr(exc),
+        )
+
+        df["tcn_score"] = np.nan
+
+        return df
+
+    # ---------------------------------------------------------------
+    # The TCN was trained with:
+    # 17 features
+    # lookback = 60
+    # ---------------------------------------------------------------
+
+    class Chomp1d(nn.Module):
+
+        def __init__(self, chomp_size):
+
+            super().__init__()
+
+            self.chomp_size = chomp_size
+
+        def forward(self, x):
+
+            if self.chomp_size == 0:
+                return x
+
+            return x[
+                :,
+                :,
+                :-self.chomp_size
+            ].contiguous()
+
+    class TemporalBlock(nn.Module):
+
+        def __init__(
+            self,
+            n_inputs,
+            n_outputs,
+            kernel_size,
+            dilation,
+            dropout,
+        ):
+
+            super().__init__()
+
+            padding = (
+                kernel_size - 1
+            ) * dilation
+
+            self.conv1 = nn.Conv1d(
+                n_inputs,
+                n_outputs,
+                kernel_size,
+                padding=padding,
+                dilation=dilation,
+            )
+
+            self.chomp1 = Chomp1d(
+                padding
+            )
+
+            self.relu1 = nn.ReLU()
+
+            self.dropout1 = nn.Dropout(
+                dropout
+            )
+
+            self.conv2 = nn.Conv1d(
+                n_outputs,
+                n_outputs,
+                kernel_size,
+                padding=padding,
+                dilation=dilation,
+            )
+
+            self.chomp2 = Chomp1d(
+                padding
+            )
+
+            self.relu2 = nn.ReLU()
+
+            self.dropout2 = nn.Dropout(
+                dropout
+            )
+
+            self.downsample = (
+                nn.Conv1d(
+                    n_inputs,
+                    n_outputs,
+                    1,
+                )
+                if n_inputs != n_outputs
+                else None
+            )
+
+            self.final_relu = nn.ReLU()
+
+        def forward(self, x):
+
+            out = self.conv1(x)
+            out = self.chomp1(out)
+            out = self.relu1(out)
+            out = self.dropout1(out)
+
+            out = self.conv2(out)
+            out = self.chomp2(out)
+            out = self.relu2(out)
+            out = self.dropout2(out)
+
+            residual = x
+
+            if self.downsample is not None:
+                residual = self.downsample(x)
+
+            return self.final_relu(
+                out + residual
+            )
+
+    class TCNClassifier(nn.Module):
+
+        def __init__(
+            self,
+            num_features,
+        ):
+
+            super().__init__()
+
+            channels = [
+                64,
+                64,
+                128,
+                128,
+            ]
+
+            blocks = []
+
+            in_channels = num_features
+
+            for i, out_channels in enumerate(
+                channels
+            ):
+
+                blocks.append(
+                    TemporalBlock(
+                        in_channels,
+                        out_channels,
+                        kernel_size=3,
+                        dilation=2 ** i,
+                        dropout=0.2,
+                    )
+                )
+
+                in_channels = out_channels
+
+            self.tcn = nn.Sequential(
+                *blocks
+            )
+
+            self.head = nn.Sequential(
+                nn.Linear(
+                    128,
+                    64,
+                ),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(
+                    64,
+                    1,
+                ),
+            )
+
+        def forward(self, x):
+
+            z = self.tcn(x)
+
+            z = z[:, :, -1]
+
+            return self.head(z).squeeze(-1)
+
+    # ---------------------------------------------------------------
+    # Find state dict
+    # ---------------------------------------------------------------
+
+    if isinstance(
+        checkpoint,
+        dict,
+    ):
+
+        if "model_state_dict" in checkpoint:
+
+            state = checkpoint[
+                "model_state_dict"
+            ]
+
+        elif "state_dict" in checkpoint:
+
+            state = checkpoint[
+                "state_dict"
+            ]
+
+        else:
+
+            state = checkpoint
+
+    else:
+
+        state = checkpoint
+
+    model = TCNClassifier(
+        len(BASE_FEATURES)
+    )
+
+    try:
+
+        model.load_state_dict(
+            state,
+            strict=True,
+        )
+
+    except Exception as exc:
+
+        print(
+            "TCN state loading failed:",
+            repr(exc),
+        )
+
+        df["tcn_score"] = np.nan
+
+        return df
+
+    model.eval()
+
+    device = (
+        torch.device("cuda")
+        if torch.cuda.is_available()
+        else torch.device("cpu")
+    )
+
+    model.to(device)
+
+    # ---------------------------------------------------------------
+    # Build sequences independently for each symbol.
+    # ---------------------------------------------------------------
+
+    feature_df = clean_features(
+        df,
+        BASE_FEATURES,
+    )
+
+    feature_df = feature_df.copy()
+
+    feature_df[
+        "timestamp"
+    ] = df["timestamp"].to_numpy()
+
+    feature_df[
+        "symbol"
+    ] = df["symbol"].to_numpy()
+
+    feature_df[
+        "_row_id"
+    ] = np.arange(len(df))
+
+    scores = np.full(
+        len(df),
+        np.nan,
+        dtype=np.float64,
+    )
+
+    lookback = 60
+
+    with torch.no_grad():
+
+        for symbol, group in feature_df.groupby(
+            "symbol",
+            sort=False,
+        ):
+
+            group = group.sort_values(
+                "timestamp"
+            )
+
+            rows = group[
+                "_row_id"
+            ].to_numpy()
+
+            values = group[
+                BASE_FEATURES
+            ].to_numpy(
+                dtype=np.float32
+            )
+
+            if len(values) < lookback:
+
+                continue
+
+            sequences = []
+
+            target_rows = []
+
+            for i in range(
+                lookback,
+                len(values) + 1,
+            ):
+
+                start = i - lookback
+                end = i
+
+                sequences.append(
+                    values[
+                        start:end
+                    ].T
+                )
+
+                target_rows.append(
+                    rows[i - 1]
+                )
+
+            if not sequences:
+
+                continue
+
+            batch = torch.tensor(
+                np.stack(sequences),
+                dtype=torch.float32,
+                device=device,
+            )
+
+            # Process in chunks to avoid GPU memory spikes.
+            batch_size = 2048
+
+            predictions = []
+
+            for start in range(
+                0,
+                len(batch),
+                batch_size,
+            ):
+
+                part = batch[
+                    start:
+                    start + batch_size
+                ]
+
+                logits = model(part)
+
+                predictions.append(
+                    torch.sigmoid(
+                        logits
+                    )
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+
+            predictions = np.concatenate(
+                predictions
+            )
+
+            scores[
+                np.asarray(target_rows)
+            ] = predictions
+
+    df["tcn_score"] = scores
+
+    print(
+        "Valid TCN scores:",
+        int(
+            np.isfinite(scores).sum()
+        ),
+    )
+
+    return df
+
+
+# =====================================================================
+# GNN
+# =====================================================================
+
+def predict_gnn(
+    df: pd.DataFrame,
+):
+
+    print()
+    print("GENERATING GNN SCORES...")
+    print("-" * 70)
+
+    try:
+
+        import torch
+        import torch.nn as nn
+
+    except Exception as exc:
+
+        print(
+            "GNN unavailable:",
+            repr(exc),
+        )
+
+        df["gnn_score"] = np.nan
+
+        return df
+
+    if not GNN_PATH.exists():
+
+        print(
+            "GNN checkpoint missing."
+        )
+
+        df["gnn_score"] = np.nan
+
+        return df
+
+    if not GRAPH_PATH.exists():
+
+        print(
+            "Graph file missing."
+        )
+
+        df["gnn_score"] = np.nan
+
+        return df
+
+    try:
+
+        checkpoint = torch.load(
+            GNN_PATH,
+            map_location="cpu",
+            weights_only=False,
+        )
+
+        graph = np.load(
+            GRAPH_PATH
+        )
+
+    except Exception as exc:
+
+        print(
+            "Could not load GNN resources:",
+            repr(exc),
+        )
+
+        df["gnn_score"] = np.nan
+
+        return df
+
+    symbols = [
+        str(x)
+        for x in graph[
+            "symbols"
+        ]
+    ]
+
+    edge_index = graph[
+        "edge_index"
+    ]
+
+    edge_weight = graph[
+        "edge_weight"
+    ]
+
+    num_nodes = len(symbols)
+
+    adjacency = np.zeros(
+        (
+            num_nodes,
+            num_nodes,
+        ),
+        dtype=np.float32,
+    )
+
+    for i in range(
+        edge_index.shape[1]
+    ):
+
+        src = int(
+            edge_index[0, i]
+        )
+
+        dst = int(
+            edge_index[1, i]
+        )
+
+        w = float(
+            edge_weight[i]
+        )
+
+        adjacency[
+            dst,
+            src
+        ] = w
+
+    # Add self loops.
+    adjacency += np.eye(
+        num_nodes,
+        dtype=np.float32,
+    )
+
+    row_sum = adjacency.sum(
+        axis=1,
+        keepdims=True,
+    )
+
+    row_sum[
+        row_sum == 0
+    ] = 1.0
+
+    adjacency = (
+        adjacency
+        / row_sum
+    )
+
+    class GraphConv(nn.Module):
+
+        def __init__(
+            self,
+            in_features,
+            out_features,
+            dropout=0.2,
+        ):
+
+            super().__init__()
+
+            self.self_linear = nn.Linear(
+                in_features,
+                out_features,
+            )
+
+            self.neighbor_linear = nn.Linear(
+                in_features,
+                out_features,
+            )
+
+            self.norm = nn.LayerNorm(
+                out_features
+            )
+
+            self.dropout = nn.Dropout(
+                dropout
+            )
+
+        def forward(
+            self,
+            x,
+            adj,
+        ):
+
+            self_part = (
+                self.self_linear(x)
+            )
+
+            neighbor = torch.matmul(
+                adj,
+                x,
+            )
+
+            neighbor_part = (
+                self.neighbor_linear(
+                    neighbor
+                )
+            )
+
+            out = (
+                self_part
+                +
+                neighbor_part
+            )
+
+            out = self.norm(out)
+
+            out = torch.relu(out)
+
+            out = self.dropout(out)
+
+            return out
+
+    class GNNClassifier(nn.Module):
+
+        def __init__(
+            self,
+            num_features,
+        ):
+
+            super().__init__()
+
+            self.conv1 = GraphConv(
+                num_features,
+                64,
+                0.2,
+            )
+
+            self.conv2 = GraphConv(
+                64,
+                64,
+                0.2,
+            )
+
+            self.head = nn.Sequential(
+                nn.Linear(
+                    64,
+                    32,
+                ),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(
+                    32,
+                    1,
+                ),
+            )
+
+        def forward(
+            self,
+            x,
+            adj,
+        ):
+
+            x = self.conv1(
+                x,
+                adj,
+            )
+
+            x = self.conv2(
+                x,
+                adj,
+            )
+
+            return self.head(
+                x
+            ).squeeze(-1)
+
+    if isinstance(
+        checkpoint,
+        dict,
+    ):
+
+        if "model_state_dict" in checkpoint:
+
+            state = checkpoint[
+                "model_state_dict"
+            ]
+
+        elif "state_dict" in checkpoint:
+
+            state = checkpoint[
+                "state_dict"
+            ]
+
+        else:
+
+            state = checkpoint
+
+    else:
+
+        state = checkpoint
+
+    model = GNNClassifier(
+        len(BASE_FEATURES)
+    )
+
+    try:
+
+        model.load_state_dict(
+            state,
+            strict=True,
+        )
+
+    except Exception as exc:
+
+        print(
+            "GNN state loading failed:",
+            repr(exc),
+        )
+
+        df["gnn_score"] = np.nan
+
+        return df
+
+    model.eval()
+
+    device = (
+        torch.device("cuda")
+        if torch.cuda.is_available()
+        else torch.device("cpu")
+    )
+
+    model.to(device)
+
+    adj = torch.tensor(
+        adjacency,
+        dtype=torch.float32,
+        device=device,
+    )
+
+    feature_data = clean_features(
+        df,
+        BASE_FEATURES,
+    )
+
+    feature_data = feature_data.copy()
+
+    feature_data[
+        "timestamp"
+    ] = df["timestamp"].to_numpy()
+
+    feature_data[
+        "symbol"
+    ] = df["symbol"].to_numpy()
+
+    feature_data[
+        "_row_id"
+    ] = np.arange(len(df))
+
+    scores = np.full(
+        len(df),
+        np.nan,
+        dtype=np.float64,
+    )
+
+    symbol_to_idx = {
+        symbol: i
+        for i, symbol in enumerate(
+            symbols
+        )
+    }
+
+    # GNN training used complete cross-sectional days.
+    # Reconstruct the same daily graph inference.
+    with torch.no_grad():
+
+        for timestamp, group in feature_data.groupby(
+            "timestamp",
+            sort=True,
+        ):
+
+            if len(group) != num_nodes:
+                continue
+
+            node_features = np.zeros(
+                (
+                    num_nodes,
+                    len(BASE_FEATURES),
+                ),
+                dtype=np.float32,
+            )
+
+            row_ids = np.zeros(
+                num_nodes,
+                dtype=np.int64,
+            )
+
+            valid = True
+
+            for _, row in group.iterrows():
+
+                symbol = str(
+                    row["symbol"]
+                )
+
+                if symbol not in symbol_to_idx:
+
+                    valid = False
+                    break
+
+                idx = symbol_to_idx[
+                    symbol
+                ]
+
+                node_features[
+                    idx
+                ] = row[
+                    BASE_FEATURES
+                ].to_numpy(
+                    dtype=np.float32
+                )
+
+                row_ids[
+                    idx
+                ] = int(
+                    row["_row_id"]
+                )
+
+            if not valid:
+                continue
+
+            x = torch.tensor(
+                node_features,
+                dtype=torch.float32,
+                device=device,
+            )
+
+            logits = model(
+                x,
+                adj,
+            )
+
+            probabilities = (
+                torch.sigmoid(
+                    logits
+                )
+                .detach()
+                .cpu()
+                .numpy()
+            )
+
+            scores[
+                row_ids
+            ] = probabilities
+
+    df["gnn_score"] = scores
+
+    print(
+        "Valid GNN scores:",
+        int(
+            np.isfinite(scores).sum()
+        ),
+    )
+
+    return df
+
+
+# =====================================================================
+# ENSEMBLE
+# =====================================================================
+
+def build_ensemble(
+    df: pd.DataFrame,
+):
+
+    df = df.copy()
+
+    score_columns = [
+        "lightgbm_score",
+        "tcn_score",
+        "gnn_score",
+        "factor_score",
+        "momentum_score",
+    ]
+
+    for col in score_columns:
+
+        if col not in df.columns:
+            df[col] = np.nan
+
+    # ---------------------------------------------------------------
+    # Cross-sectional percentile scores.
+    # ---------------------------------------------------------------
+
+    for col in score_columns:
+
+        rank_col = (
+            f"{col}_rank"
+        )
+
+        df[rank_col] = (
+            df.groupby("timestamp")[col]
+            .rank(
+                ascending=False,
+                pct=True,
+                method="average",
+            )
+        )
+
+    # ---------------------------------------------------------------
+    # Model ensemble.
+    #
+    # LightGBM receives highest weight because it is the only model
+    # with strong feature-wise ranking training.
+    #
+    # Factor score is included because the factor walk-forward showed
+    # substantially more robust out-of-sample behavior than TCN/GNN.
+    # ---------------------------------------------------------------
+
+    components = [
+        (
+            "lightgbm_score_rank",
+            0.50,
+        ),
+        (
+            "factor_score_rank",
+            0.25,
+        ),
+        (
+            "momentum_score_rank",
+            0.15,
+        ),
+        (
+            "tcn_score_rank",
+            0.05,
+        ),
+        (
+            "gnn_score_rank",
+            0.05,
+        ),
+    ]
+
+    total = np.zeros(
+        len(df),
+        dtype=np.float64,
+    )
+
+    weights = np.zeros(
+        len(df),
+        dtype=np.float64,
+    )
+
+    for col, weight in components:
+
+        values = df[col].to_numpy(
+            dtype=np.float64
+        )
+
+        valid = np.isfinite(
+            values
+        )
+
+        total[valid] += (
+            weight
+            * values[valid]
+        )
+
+        weights[valid] += weight
+
+    df["ensemble_score"] = np.divide(
+        total,
+        weights,
+        out=np.full(
+            len(df),
+            0.5,
+            dtype=np.float64,
+        ),
+        where=weights > 0,
+    )
+
+    return df
+
+
+# =====================================================================
+# BACKTEST
+# =====================================================================
+
+def backtest_top_k(
+    df: pd.DataFrame,
+    score_col: str,
+    top_k: int,
+):
+
+    rows = []
+
+    for timestamp, group in df.groupby(
+        "timestamp",
+        sort=True,
+    ):
+
+        group = group.dropna(
+            subset=[score_col]
+        )
+
+        if len(group) < top_k:
+            continue
+
+        selected = (
+            group
+            .sort_values(
+                score_col,
+                ascending=False,
+            )
+            .head(top_k)
+        )
+
+        if "future_return_5d" not in selected:
+            continue
+
+        future = (
+            selected[
+                "future_return_5d"
+            ]
+            .replace(
+                [np.inf, -np.inf],
+                np.nan,
+            )
+            .dropna()
+        )
+
+        if len(future) < top_k:
+            continue
+
+        rows.append(
+            {
+                "timestamp": timestamp,
+                "return": float(
+                    future.mean()
+                ),
+            }
+        )
+
+    if not rows:
+
+        return None
+
+    result = pd.DataFrame(
+        rows
+    )
+
+    result = result.sort_values(
+        "timestamp"
+    )
+
+    returns = result[
+        "return"
+    ].to_numpy(
+        dtype=np.float64
+    )
+
+    equity = np.cumprod(
+        1.0 + returns
+    )
+
+    total_return = (
+        equity[-1] - 1.0
+    )
+
+    periods = len(returns)
+
+    if periods > 1:
+
+        years = periods * 5.0 / 252.0
+
+    else:
+
+        years = 1.0
+
+    if years > 0:
+
+        cagr = (
+            (1.0 + total_return)
+            ** (1.0 / years)
+            - 1.0
+        )
+
+    else:
+
+        cagr = np.nan
+
+    std = np.std(
+        returns,
+        ddof=1,
+    ) if len(returns) > 1 else 0.0
+
+    sharpe = (
+        np.mean(returns)
+        / std
+        * np.sqrt(252.0 / 5.0)
+        if std > 0
+        else np.nan
+    )
+
+    downside = returns[
+        returns < 0
+    ]
+
+    downside_std = (
+        np.std(
+            downside,
+            ddof=1,
+        )
+        if len(downside) > 1
+        else 0.0
+    )
+
+    sortino = (
+        np.mean(returns)
+        / downside_std
+        * np.sqrt(252.0 / 5.0)
+        if downside_std > 0
+        else np.nan
+    )
+
+    hit_rate = float(
+        np.mean(
+            returns > 0
+        )
+    )
+
+    running_max = np.maximum.accumulate(
+        equity
+    )
+
+    drawdown = (
+        equity / running_max
+        - 1.0
+    )
+
+    max_drawdown = float(
+        drawdown.min()
+    )
+
+    return {
+        "total_return": float(
+            total_return
+        ),
+        "CAGR": float(
+            cagr
+        ),
+        "Sharpe": float(
+            sharpe
+        ),
+        "Sortino": float(
+            sortino
+        ),
+        "HitRate": float(
+            hit_rate
+        ),
+        "MaxDrawdown": max_drawdown,
+        "periods": periods,
+    }
+
+
+# =====================================================================
+# MAIN
+# =====================================================================
+
+def main():
+
+    print("=" * 70)
+    print(
+        "MODEL ENSEMBLE CROSS-SECTIONAL BACKTEST"
+    )
+    print("=" * 70)
+
+    df = load_data()
+
+    # ---------------------------------------------------------------
+    # BUILD CROSS-SECTIONAL FEATURES
+    # ---------------------------------------------------------------
+
+    print()
+    print(
+        "BUILDING CROSS-SECTIONAL FEATURES..."
+    )
+    print("-" * 70)
+
+    df = add_cross_sectional_features(
+        df
+    )
+
+    print(
+        "Cross-sectional features ready."
+    )
+
+    # ---------------------------------------------------------------
+    # TEST PERIOD
+    # ---------------------------------------------------------------
+
+    test_start = pd.Timestamp(
+        "2025-01-01",
+        tz="UTC",
+    )
+
+    test = df[
+        df["timestamp"]
+        >= test_start
+    ].copy()
+
+    print()
+    print("TEST")
+    print("-" * 70)
+    print("Rows   :", len(test))
+    print(
+        "Days   :",
+        test["timestamp"].nunique(),
+    )
+    print(
+        "Symbols:",
+        test["symbol"].nunique(),
+    )
+
+    # ---------------------------------------------------------------
+    # FUTURE RETURN
+    # ---------------------------------------------------------------
+
+    # If future_return_5d already exists, use it.
+    # Otherwise construct it symbol-by-symbol.
+
+    if "future_return_5d" not in test.columns:
+
+        print()
+        print(
+            "Building future_return_5d..."
+        )
+
+        full = df.sort_values(
+            ["symbol", "timestamp"]
+        ).copy()
+
+        full["future_return_5d"] = (
+            full.groupby("symbol")[
+                "close"
+            ]
+            .shift(-5)
+            / full["close"]
+            - 1.0
+        )
+
+        test = full[
+            full["timestamp"]
+            >= test_start
+        ].copy()
+
+    # ---------------------------------------------------------------
+    # LIGHTGBM
+    # ---------------------------------------------------------------
+
+    lgb_model = load_lightgbm()
+
+    test = predict_lightgbm(
+        lgb_model,
+        test,
+    )
+
+    # ---------------------------------------------------------------
+    # FACTORS
+    # ---------------------------------------------------------------
+
+    print()
+    print(
+        "GENERATING FACTOR SCORES..."
+    )
+    print("-" * 70)
+
+    test = add_factor_score(
+        test
+    )
+
+    test = add_momentum_score(
+        test
+    )
+
+    # ---------------------------------------------------------------
+    # TCN
+    # ---------------------------------------------------------------
+
+    test = predict_tcn(
+        df
+    )
+
+    # Merge TCN scores back into test.
+    if (
+        "_row_id" not in test.columns
+    ):
+
+        # Predict directly on test if necessary.
+        tcn_all = predict_tcn(
+            test
+        )
+
+        test["tcn_score"] = (
+            tcn_all["tcn_score"]
+            .to_numpy()
+        )
+
+    # ---------------------------------------------------------------
+    # GNN
+    # ---------------------------------------------------------------
+
+    test = predict_gnn(
+        test
+    )
+
+    # ---------------------------------------------------------------
+    # If TCN was generated on full data, align carefully.
+    # ---------------------------------------------------------------
+
+    if len(test) != len(df):
+
+        pass
+
+    # ---------------------------------------------------------------
+    # Build ensemble
+    # ---------------------------------------------------------------
+
+    test = build_ensemble(
+        test
+    )
+
+    # ---------------------------------------------------------------
+    # Diagnostics
+    # ---------------------------------------------------------------
+
+    print()
+    print(
+        "SCORE COVERAGE"
+    )
+    print("-" * 70)
+
+    for col in [
+        "lightgbm_score",
+        "factor_score",
+        "momentum_score",
+        "tcn_score",
+        "gnn_score",
+        "ensemble_score",
+    ]:
+
+        valid = int(
+            np.isfinite(
+                test[col].to_numpy(
+                    dtype=float
+                )
+            ).sum()
+        )
+
+        print(
+            f"{col:25s}: "
+            f"{valid:6d} / {len(test)}"
+        )
+
+    # ---------------------------------------------------------------
+    # BACKTEST
+    # ---------------------------------------------------------------
+
+    print()
+    print("=" * 70)
+    print(
+        "NON-OVERLAPPING PORTFOLIO RESULTS"
+    )
+    print("=" * 70)
+
+    results = []
+
+    strategies = [
+        (
+            "LIGHTGBM",
+            "lightgbm_score",
+        ),
+        (
+            "FACTOR",
+            "factor_score",
+        ),
+        (
+            "MOMENTUM",
+            "momentum_score",
+        ),
+        (
+            "TCN",
+            "tcn_score",
+        ),
+        (
+            "GNN",
+            "gnn_score",
+        ),
+        (
+            "ENSEMBLE",
+            "ensemble_score",
+        ),
+    ]
+
+    for name, score_col in strategies:
+
+        print()
+        print(
+            name
+        )
+        print("-" * 70)
+
+        for top_k in [
+            1,
+            3,
+            5,
+            10,
+        ]:
+
+            metrics = backtest_top_k(
+                test,
+                score_col,
+                top_k,
+            )
+
+            if metrics is None:
+
+                print(
+                    f"TOP {top_k}: "
+                    "NO VALID DATA"
+                )
+
+                continue
+
+            print(
+                f"TOP {top_k}"
+            )
+
+            print(
+                f"total_return : "
+                f"{metrics['total_return']:.6f}"
+            )
+
+            print(
+                f"CAGR         : "
+                f"{metrics['CAGR']:.6f}"
+            )
+
+            print(
+                f"Sharpe       : "
+                f"{metrics['Sharpe']:.6f}"
+            )
+
+            print(
+                f"Sortino      : "
+                f"{metrics['Sortino']:.6f}"
+            )
+
+            print(
+                f"HitRate      : "
+                f"{metrics['HitRate']:.6f}"
+            )
+
+            print(
+                f"MaxDrawdown  : "
+                f"{metrics['MaxDrawdown']:.6f}"
+            )
+
+            results.append(
+                {
+                    "Strategy": name,
+                    "TopK": top_k,
+                    **metrics,
+                }
+            )
+
+    # ---------------------------------------------------------------
+    # FINAL TABLE
+    # ---------------------------------------------------------------
+
+    if results:
+
+        summary = pd.DataFrame(
+            results
+        )
+
+        print()
+        print("=" * 70)
+        print(
+            "FINAL SUMMARY"
+        )
+        print("=" * 70)
+
+        print(
+            summary.to_string(
+                index=False
+            )
+        )
+
+    print()
+    print("=" * 70)
+    print(
+        "ENSEMBLE BACKTEST COMPLETE"
+    )
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()

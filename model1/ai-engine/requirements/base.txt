@@ -1,0 +1,11 @@
+numpy
+pandas
+scipy
+scikit-learn
+pyarrow
+duckdb
+pyyaml
+python-dotenv
+requests
+tqdm
+joblib

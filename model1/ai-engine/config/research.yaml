@@ -1,0 +1,44 @@
+project:
+  name: "Model 1"
+  version: "0.1.0"
+  stage: "foundation"
+  random_seed: 42
+
+market:
+  primary:
+    exchange: "NSE"
+    country: "India"
+    currency: "INR"
+    timezone: "Asia/Kolkata"
+
+research:
+  default_horizon_days: 1
+
+  timeframes:
+    - "5m"
+    - "15m"
+    - "1h"
+    - "1d"
+
+  evaluation:
+    method: "walk_forward"
+
+  experiment_tracking:
+    enabled: true
+    backend: "mlflow"
+
+data:
+  format: "parquet"
+  database: "duckdb"
+
+models:
+  baseline:
+    - "naive"
+    - "logistic_regression"
+    - "random_forest"
+    - "xgboost"
+    - "lightgbm"
+
+compute:
+  device: "cuda"
+  gpu: true

@@ -1,0 +1,28 @@
+services:
+  ai-engine:
+    build:
+      context: ./ai-engine
+      dockerfile: Dockerfile
+
+    container_name: model1-ai-engine
+
+    env_file:
+      - .env
+
+    working_dir: /workspace
+
+    volumes:
+      - ./ai-engine:/workspace
+
+    ports:
+      - "8888:8888"
+
+    environment:
+      TZ: Asia/Kolkata
+      PYTHONUNBUFFERED: "1"
+
+    gpus: all
+
+    shm_size: "4gb"
+
+    restart: unless-stopped

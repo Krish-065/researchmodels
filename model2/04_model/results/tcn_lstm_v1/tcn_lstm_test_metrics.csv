@@ -1,0 +1,2 @@
+test_loss,test_return_1d_mae,test_return_3d_mae,test_return_5d_mae,test_direction_1d_accuracy,test_direction_1d_auc,test_direction_5d_accuracy,test_direction_5d_auc
+0.7773049473762512,0.014946678653359413,0.028043104335665703,0.03205714374780655,0.47889792919158936,0.5066765546798706,0.4775203466415405,0.4736201763153076

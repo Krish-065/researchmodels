@@ -1,0 +1,269 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+
+
+INPUT = Path("/workspace/data/features/nse_features.parquet")
+
+TCN_MODEL = Path("/workspace/data/models/tcn_5d.pt")
+
+
+SEED = 42
+
+
+def evaluate_ranking(
+    name,
+    df,
+    score_column,
+):
+    print()
+    print("=" * 70)
+    print(name)
+    print("=" * 70)
+
+    x = df[
+        [
+            "timestamp",
+            "symbol",
+            "future_return_5d",
+            score_column,
+        ]
+    ].copy()
+
+    x["rank"] = (
+        x.groupby("timestamp")[score_column]
+        .rank(
+            ascending=False,
+            method="first",
+        )
+    )
+
+    for k in [1, 3, 5, 10]:
+
+        top = x[
+            x["rank"] <= k
+        ]
+
+        daily_return = (
+            top.groupby("timestamp")[
+                "future_return_5d"
+            ]
+            .mean()
+        )
+
+        mean_return = daily_return.mean()
+        std_return = daily_return.std()
+
+        sharpe = (
+            np.sqrt(252 / 5)
+            * mean_return
+            / std_return
+            if std_return > 0
+            else np.nan
+        )
+
+        hit_rate = (
+            top["future_return_5d"] > 0
+        ).mean()
+
+        cumulative = (
+            1 + daily_return
+        ).cumprod()
+
+        running_max = cumulative.cummax()
+
+        drawdown = (
+            cumulative / running_max
+            - 1
+        )
+
+        max_drawdown = drawdown.min()
+
+        print()
+        print(f"TOP {k}")
+        print(
+            "Mean 5d return :",
+            f"{mean_return:.6f}",
+        )
+        print(
+            "Std  5d return :",
+            f"{std_return:.6f}",
+        )
+        print(
+            "Approx Sharpe  :",
+            f"{sharpe:.6f}",
+        )
+        print(
+            "Hit rate       :",
+            f"{hit_rate:.6f}",
+        )
+        print(
+            "Max drawdown   :",
+            f"{max_drawdown:.6f}",
+        )
+
+
+def main():
+
+    np.random.seed(SEED)
+
+    print("=" * 70)
+    print("RANKING ROBUSTNESS CHECK")
+    print("=" * 70)
+
+    df = pd.read_parquet(
+        INPUT
+    )
+
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"],
+        utc=True,
+    )
+
+    df = df.sort_values(
+        [
+            "timestamp",
+            "symbol",
+        ]
+    ).reset_index(drop=True)
+
+    test = df[
+        df.timestamp >= "2025-01-01"
+    ].copy()
+
+    print()
+    print("TEST ROWS:", len(test))
+    print(
+        "TEST DAYS:",
+        test.timestamp.nunique(),
+    )
+    print(
+        "TEST SYMBOLS:",
+        test.symbol.nunique(),
+    )
+
+    # --------------------------------------------------------
+    # 1. RANDOM BASELINE
+    # --------------------------------------------------------
+
+    random_scores = []
+
+    for timestamp, group in test.groupby(
+        "timestamp",
+        sort=True,
+    ):
+
+        scores = np.random.random(
+            len(group)
+        )
+
+        temp = pd.DataFrame(
+            {
+                "timestamp": group[
+                    "timestamp"
+                ].values,
+                "symbol": group[
+                    "symbol"
+                ].values,
+                "score": scores,
+                "future_return_5d": group[
+                    "future_return_5d"
+                ].values,
+            }
+        )
+
+        random_scores.append(temp)
+
+    random_df = pd.concat(
+        random_scores,
+        ignore_index=True,
+    )
+
+    evaluate_ranking(
+        "RANDOM BASELINE",
+        random_df.rename(
+            columns={
+                "score": "random_score"
+            }
+        ),
+        "random_score",
+    )
+
+    # --------------------------------------------------------
+    # 2. SIMPLE MOMENTUM
+    # --------------------------------------------------------
+
+    test["momentum_score"] = (
+        test["return_20d"]
+    )
+
+    evaluate_ranking(
+        "SIMPLE 20-DAY MOMENTUM",
+        test,
+        "momentum_score",
+    )
+
+    # --------------------------------------------------------
+    # 3. TCN MODEL
+    # --------------------------------------------------------
+
+    checkpoint = torch.load(
+        TCN_MODEL,
+        map_location="cpu",
+    )
+
+    print()
+    print(
+        "TCN checkpoint loaded."
+    )
+
+    print(
+        "Features:",
+        len(checkpoint["features"]),
+    )
+
+    print(
+        "Lookback:",
+        checkpoint["lookback"],
+    )
+
+    print(
+        "Stored validation AUC:",
+        checkpoint[
+            "best_validation_auc"
+        ],
+    )
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # We cannot safely reconstruct the TCN architecture here
+    # unless it exactly matches train_tcn.py.
+    #
+    # Therefore the first three baselines are evaluated now.
+    # TCN predictions should be generated by a dedicated inference
+    # script using the exact saved architecture.
+    # --------------------------------------------------------
+
+    print()
+    print("=" * 70)
+    print("NEXT")
+    print("=" * 70)
+
+    print(
+        "Random and momentum baselines completed."
+    )
+
+    print(
+        "TCN inference should be generated using the exact "
+        "train_tcn.py architecture before comparing it."
+    )
+
+
+if __name__ == "__main__":
+    main()

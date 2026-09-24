@@ -1,0 +1,222 @@
+from __future__ import annotations
+
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+
+INPUT = Path("/workspace/data/processed/market/nse_equity_daily.parquet")
+OUTPUT = Path("/workspace/data/features/nse_features.parquet")
+
+
+def add_features(g: pd.DataFrame) -> pd.DataFrame:
+    g = g.sort_values("timestamp").copy()
+
+    close = g["close"]
+    volume = g["volume"]
+
+    # Historical returns
+    g["return_1d"] = close.pct_change(1)
+    g["return_5d"] = close.pct_change(5)
+    g["return_20d"] = close.pct_change(20)
+    g["return_60d"] = close.pct_change(60)
+
+    # Moving averages
+    g["sma_5"] = close.rolling(5).mean()
+    g["sma_20"] = close.rolling(20).mean()
+    g["sma_50"] = close.rolling(50).mean()
+    g["sma_200"] = close.rolling(200).mean()
+
+    # Relative price position
+    g["close_sma5_ratio"] = close / g["sma_5"] - 1
+    g["close_sma20_ratio"] = close / g["sma_20"] - 1
+    g["close_sma50_ratio"] = close / g["sma_50"] - 1
+    g["close_sma200_ratio"] = close / g["sma_200"] - 1
+
+    # EMA / MACD
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+
+    g["ema_12"] = ema12
+    g["ema_26"] = ema26
+    g["macd"] = ema12 - ema26
+    g["macd_signal"] = g["macd"].ewm(span=9, adjust=False).mean()
+
+    # RSI
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    g["rsi_14"] = 100 - (100 / (1 + rs))
+
+    # Volatility
+    g["volatility_20d"] = g["return_1d"].rolling(20).std()
+    g["volatility_60d"] = g["return_1d"].rolling(60).std()
+
+    # Intraday structure
+    g["high_low_range"] = (g["high"] - g["low"]) / close
+    g["open_close_return"] = (g["close"] - g["open"]) / g["open"]
+
+    # Volume
+    #
+    # Do not use raw pct_change() here because historical market data
+    # can contain zero-volume observations. A zero denominator creates
+    # +/-inf values and contaminates the feature matrix.
+    #
+    # log1p(volume) is well-defined for zero volume and produces a
+    # stable relative-volume-change signal.
+    g["volume_change"] = np.log1p(volume).diff()
+
+    volume_mean = volume.rolling(20).mean()
+    volume_std = volume.rolling(20).std()
+
+    g["volume_zscore"] = (
+        (volume - volume_mean)
+        / volume_std.replace(0, np.nan)
+    )
+
+    # Future targets.
+    # These are deliberately shifted into the future.
+    g["future_return_1d"] = close.shift(-1) / close - 1
+    g["future_return_5d"] = close.shift(-5) / close - 1
+    g["future_return_20d"] = close.shift(-20) / close - 1
+
+    g["target_up_5d"] = (
+        g["future_return_5d"] > 0
+    ).astype("int8")
+
+    return g
+
+
+def main():
+    print("=" * 70)
+    print("BUILDING MARKET FEATURES")
+    print("=" * 70)
+
+    df = pd.read_parquet(INPUT)
+
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"],
+        utc=True,
+    )
+
+    # Apply independently to each stock.
+    frames = []
+
+    for symbol, group in df.groupby("symbol", sort=False):
+        frames.append(add_features(group))
+
+    result = pd.concat(
+        frames,
+        ignore_index=True,
+    )
+
+    result = result.sort_values(
+        ["symbol", "timestamp"]
+    ).reset_index(drop=True)
+
+    # Required features that need sufficient history.
+    required = [
+        "return_1d",
+        "return_5d",
+        "return_20d",
+        "return_60d",
+        "sma_20",
+        "sma_50",
+        "sma_200",
+        "volatility_20d",
+        "rsi_14",
+        "macd",
+        "volume_zscore",
+    ]
+
+    before = len(result)
+
+    result = result.dropna(
+        subset=required
+    ).copy()
+
+    # We cannot train on rows without a known 5-day future target.
+    result = result.dropna(
+        subset=[
+            "future_return_5d",
+            "target_up_5d",
+        ]
+    ).copy()
+
+    result = result.reset_index(drop=True)
+
+    # Final numerical safety check.
+    # No model feature may contain +/-inf.
+    feature_columns = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "adjusted_close",
+        "return_1d",
+        "return_5d",
+        "return_20d",
+        "return_60d",
+        "sma_5",
+        "sma_20",
+        "sma_50",
+        "sma_200",
+        "close_sma5_ratio",
+        "close_sma20_ratio",
+        "close_sma50_ratio",
+        "close_sma200_ratio",
+        "ema_12",
+        "ema_26",
+        "macd",
+        "macd_signal",
+        "rsi_14",
+        "volatility_20d",
+        "volatility_60d",
+        "high_low_range",
+        "open_close_return",
+        "volume_change",
+        "volume_zscore",
+    ]
+
+    non_finite = ~np.isfinite(
+        result[feature_columns].to_numpy(dtype=float)
+    )
+
+    if non_finite.any():
+        bad_count = int(non_finite.sum())
+        raise RuntimeError(
+            f"Feature pipeline produced {bad_count} non-finite values."
+        )
+
+    OUTPUT.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    result.to_parquet(
+        OUTPUT,
+        index=False,
+    )
+
+    print()
+    print("=" * 70)
+    print("SUCCESS")
+    print("=" * 70)
+    print("Input rows     :", f"{before:,}")
+    print("Output rows    :", f"{len(result):,}")
+    print("Removed rows   :", f"{before - len(result):,}")
+    print("Symbols        :", result["symbol"].nunique())
+    print("Columns        :", len(result.columns))
+    print("First          :", result["timestamp"].min())
+    print("Last           :", result["timestamp"].max())
+    print("Output         :", OUTPUT)
+
+
+if __name__ == "__main__":
+    main()

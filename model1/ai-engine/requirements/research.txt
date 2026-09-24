@@ -1,0 +1,8 @@
+jupyterlab
+ipykernel
+matplotlib
+seaborn
+plotly
+optuna
+mlflow
+yfinance>=1.0,<2.0

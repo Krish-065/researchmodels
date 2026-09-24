@@ -1,0 +1,11 @@
+{
+  "lookback": 60,
+  "features": 450,
+  "batch_size": 512,
+  "epochs": 50,
+  "seed": 42,
+  "architecture": "TCN + LSTM",
+  "train_rows": 57624,
+  "validation_rows": 24255,
+  "test_rows": 7985
+}

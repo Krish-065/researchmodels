@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Research data
+ai-engine/data/raw/*
+ai-engine/data/processed/*
+ai-engine/data/external/*
+ai-engine/data/features/*
+
+# ML models
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+
+# Experiment outputs
+mlruns/
+wandb/
+runs/
+logs/
+
+# Environment variables
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

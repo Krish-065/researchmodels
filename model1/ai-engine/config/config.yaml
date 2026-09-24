@@ -1,0 +1,25 @@
+project:
+  name: "NonStock AI"
+  version: "0.1.0"
+  environment: "research"
+
+market:
+  default_market: "NSE"
+  default_currency: "INR"
+  timezone: "Asia/Kolkata"
+
+data:
+  raw_path: "ai-engine/data/raw"
+  processed_path: "ai-engine/data/processed"
+  external_path: "ai-engine/data/external"
+  features_path: "ai-engine/data/features"
+
+models:
+  random_seed: 42
+
+research:
+  default_timeframes:
+    - "1d"
+    - "1h"
+    - "15m"
+    - "5m"

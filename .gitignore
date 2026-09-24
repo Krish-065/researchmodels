@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Large/raw research data
+01_raw/
+02_interim/
+03_features/
+
+# Large model datasets / sequence tensors
+model1/**/data/
+model1/**/datasets/
+model1/**/sequences/
+model1/**/models/
+model1/**/checkpoints/
+
+model2/04_model/datasets/
+model2/04_model/sequences/
+model2/04_model/models/
+model2/04_model/checkpoints/
+
+# Large scientific/data files
+*.parquet
+*.feather
+*.pkl
+*.pickle
+*.joblib
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.keras
+*.ckpt
+*.bin
+*.pt
+*.pth
+
+# Logs / temporary outputs
+*.log
+*.tmp
+*.cache
